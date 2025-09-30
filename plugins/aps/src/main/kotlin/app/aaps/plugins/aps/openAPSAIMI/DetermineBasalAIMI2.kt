@@ -2611,7 +2611,7 @@ private fun calculateDynamicPeakTime(
     if (currentActivity > 0.1) {
         val adjustment = currentActivity * 20 + 5
         dynamicPeakTime += adjustment
-        reasonBuilder.append("  • Ajout lié IOB: +$adjustment\n")
+        reasonBuilder.append("  • Ajout lié IOB: +${round(adjustment,2)}\n")
     }
 
     // 3️⃣ Ratio d'activité
@@ -2621,7 +2621,7 @@ private fun calculateDynamicPeakTime(
         else -> 1.0
     }
     dynamicPeakTime *= ratioFactor
-    reasonBuilder.append("  • Ratio activité: ${round(activityRatio,2)} ➝ facteur $ratioFactor\n")
+    reasonBuilder.append("  • Ratio activité: ${round(activityRatio,2)} ➝ facteur ${round(ratioFactor,2)}\n")
 
     // 4️⃣ Nombre de pas
     stepCount?.let {
@@ -2678,7 +2678,7 @@ private fun calculateDynamicPeakTime(
 
     // 🔚 Clamp entre 35 et 120
     val finalPeak = dynamicPeakTime.coerceIn(35.0, 120.0)
-    reasonBuilder.append("  → Résultat PeakTime final : $finalPeak\n")
+    reasonBuilder.append("  → Résultat PeakTime final : ${round(finalPeak,2)}\n")
     return finalPeak
 }
 
@@ -4222,7 +4222,7 @@ rT.reason.appendLine(
             }
 
 // ------------------------------
-// 6️⃣ Hausses lentes / rapides
+// 6️⃣ Hausses lentes / rapides (slow / fast increases)
             if (chosenRate == null) {
                 if (bg > 120 &&
                     slopeFromMinDeviation in 0.4..20.0 &&
@@ -4289,12 +4289,22 @@ rT.reason.appendLine(
                 when {
                     eventualBG > 180 && delta > 3  ->
                         chosenRate = calculateBasalRate(basalaimi.toDouble(), profile_current_basal, basalAdjustmentFactor).also {
-                            rT.reason.append("EventualBG>180 & hyper → ajustement basalaimi.\n")
+                            rT.reason.append("-9a- EventualBG>180 & hyper → ajustement basalaimi.\n")
                         }
 
-                    bg > 180 && delta in -5.0..1.0 ->
+                    bg > 180 && eventualBG < 180 ->
+                        chosenRate = (profile_current_basal * 0).also {
+                            rT.reason.append("-9b- BG>180 & EventualBG>180 → basal x0.\n")
+                        }
+
+                    bg > 180 && bg < 216 && delta in -5.0..1.0 ->
+                        chosenRate = (profile_current_basal * 2).also {
+                            rT.reason.append("-9c- 180<BG<216 stable → basal x2.\n")
+                        }
+
+                    bg > 216 && delta in -5.0..1.0 ->
                         chosenRate = (profile_current_basal * basalAdjustmentFactor).also {
-                            rT.reason.append("BG>180 stable → basale x facteur.\n")
+                            rT.reason.append("-9d- BG>216 stable → basale x facteur.\n")
                         }
                 }
             }
