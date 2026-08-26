@@ -63,6 +63,10 @@ class Libre3CgmDriverReal(
     @Volatile
     private var failedAttempts = 0
 
+    /** True while another job on the same radio must not be disturbed. See [setRadioBackOff]. */
+    @Volatile
+    private var radioBackOff = false
+
     /**
      * Raised on every new [connect] and every [stopSession], so a retry that was already queued
      * cannot start after the user asked to stop, or after a newer connect has begun.
@@ -102,6 +106,18 @@ class Libre3CgmDriverReal(
     }
 
     /**
+     * ⚠️ ASYNC IMPACT: called from the thread that watches the lease, not from [bleExecutor]. It
+     * only sets a flag and asks the platform for an interval, neither of which waits on anything,
+     * so it does not have to be queued behind a running session.
+     */
+    override fun setRadioBackOff(backOff: Boolean) {
+        if (radioBackOff == backOff) return
+        radioBackOff = backOff
+        Libre3Log.i("${Libre3LogMarkers.SESSION}: radio back off = $backOff")
+        gatt?.setLowPower(backOff)
+    }
+
+    /**
      * Ends a running session from **any** thread.
      *
      * The read loop below holds the driver's only executor for the whole life of a session, so a
@@ -129,12 +145,45 @@ class Libre3CgmDriverReal(
         watchers.forEach { it.onSession(false, reason.name) }
     }
 
+    /**
+     * Ends a session whose link died, and gets the driver ready to try again.
+     *
+     * It does everything [stopSession] does **except raise the generation**, and that is the whole
+     * point: the generation is what tells a queued retry that it is stale, so raising it here would
+     * cancel the very retry this failure has to start. A newer [connect] or a [stopSession] still
+     * raises it, and still wins over anything queued here.
+     */
+    private fun endSessionAfterLinkLoss(generation: Int) {
+        sessionUp = false
+        val current = session
+        session = null
+        gatt = null
+        current?.close(Libre3DisconnectPolicy.Reason.LINK_LOST)
+        watchers.forEach { it.onSession(false, Libre3DisconnectPolicy.Reason.LINK_LOST.name) }
+        Libre3Log.i("${Libre3LogMarkers.SESSION}: reading stopped, the link is gone")
+
+        if (generation != connectGeneration) return
+        failedAttempts++
+        val message = "the link to the sensor was lost"
+        publishWarmup(Libre3WarmupState.Phase.RECONNECTING, message = message)
+        Libre3Log.w("${Libre3LogMarkers.RECONNECT}: link lost, attempt $failedAttempts")
+        watchers.forEach { it.onError(message, false) }
+        scheduleRetry(generation)
+    }
+
     override fun warmupState(): Libre3WarmupState = warmup
 
     override fun isSessionUp(): Boolean = sessionUp
 
     private fun openSession(generation: Int) {
         if (generation != connectGeneration) return
+        // Opening a session begins with a scan, so it waits for the radio to come back. The sensor
+        // is not given up: the retry keeps knocking at the slow pace until the lease ends.
+        if (radioBackOff) {
+            Libre3Log.i("${Libre3LogMarkers.SESSION}: not opening a session, the radio is lent out")
+            scheduleRetry(generation)
+            return
+        }
         val appContext = context ?: return
         val sensorStore = store ?: return
         val client = Libre3GattClientAndroid(appContext)
@@ -147,8 +196,11 @@ class Libre3CgmDriverReal(
             is Libre3BleSession.Result.Up      -> {
                 failedAttempts = 0
                 sessionUp = true
+                // The back off may have been asked for while this link was still coming up, and
+                // the interval is only settable once there is a link to set it on.
+                if (radioBackOff) client.setLowPower(true)
                 watchers.forEach { it.onSession(true, null) }
-                startReading(newSession, client, sensorStore)
+                startReading(newSession, client, sensorStore, generation)
             }
 
             is Libre3BleSession.Result.Refused -> {
@@ -186,8 +238,11 @@ class Libre3CgmDriverReal(
      * [ExecutorService.shutdownNow].
      */
     private fun scheduleRetry(generation: Int) {
-        val delayMs = Libre3ReconnectPolicy.nextDelayMs(failedAttempts)
-        Libre3Log.i("${Libre3LogMarkers.RECONNECT}: retry in ${delayMs}ms")
+        // A retry means a scan, and a scan is the one thing a backed off driver must not do. So the
+        // wait is stretched to the slow pace and the ladder is not climbed, which keeps this driver
+        // off the air without giving the sensor up.
+        val delayMs = if (radioBackOff) Libre3ReconnectPolicy.SLOW_RETRY_MS else Libre3ReconnectPolicy.nextDelayMs(failedAttempts)
+        Libre3Log.i("${Libre3LogMarkers.RECONNECT}: retry in ${delayMs}ms, backOff=$radioBackOff")
         bleExecutor.execute {
             try {
                 Thread.sleep(delayMs)
@@ -197,6 +252,10 @@ class Libre3CgmDriverReal(
             }
             if (generation != connectGeneration) return@execute
             if (sessionUp) return@execute
+            if (radioBackOff) {
+                scheduleRetry(generation)
+                return@execute
+            }
             openSession(generation)
         }
     }
@@ -212,6 +271,7 @@ class Libre3CgmDriverReal(
         openSession: Libre3BleSession,
         client: Libre3GattClient,
         sensorStore: Libre3SensorStore,
+        generation: Int,
     ) {
         val crypto = openSession.dataPlaneCrypto() ?: return
         val identity = sensorStore.loadIdentity() ?: return
@@ -248,10 +308,18 @@ class Libre3CgmDriverReal(
                 Libre3Log.w("${Libre3LogMarkers.BG}: message dropped, ${e.javaClass.simpleName}")
             }
         }
-        // The loop only ends when the link is gone or a stop was asked for. Either way the session
-        // is over, and the executor is free again for the next attempt.
-        if (sessionUp) stopSession(Libre3DisconnectPolicy.Reason.LINK_LOST)
-        Libre3Log.i("${Libre3LogMarkers.SESSION}: reading stopped")
+        // The loop ends for one of two reasons, and they must not be treated alike.
+        //
+        // - A stop was asked for. Then [sessionUp] is already false, the generation was already
+        //   raised, and the driver must stay quiet.
+        // - The link died on its own. Then nobody asked for anything, the sensor is still on the
+        //   arm and its key is still good, so the driver has to knock again. Before this existed
+        //   the session simply ended here and only a new NFC scan brought the sensor back.
+        if (sessionUp) {
+            endSessionAfterLinkLoss(generation)
+        } else {
+            Libre3Log.i("${Libre3LogMarkers.SESSION}: reading stopped")
+        }
     }
 
     /**
