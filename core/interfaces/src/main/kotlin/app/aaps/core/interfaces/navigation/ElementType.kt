@@ -38,6 +38,12 @@ enum class ElementType(
     // DB write, and a client has no CGM source to calibrate — so it stays local/master-only (see Track B calibration notes).
     CALIBRATION(category = ElementCategory.CGM, searchable = true),
 
+    // Eversense's own calibration: writes a fingerstick value straight to the transmitter over
+    // Bluetooth, not through the activeCalibration / xDrip broadcast that CALIBRATION above uses.
+    // A client has no Bluetooth link to the transmitter, so like CALIBRATION this stays local to
+    // the master and is not gated on client pairing.
+    EVERSENSE_CALIBRATION(category = ElementCategory.CGM, searchable = true),
+
     // Profile & Targets — minimum level is BOLUS; screen mode (PLAY/EDIT) determined by granted auth level.
     // Mutating editors whose writes ride Client-Control → CLIENT_PAIRED (hidden on an unpaired client).
     // PROFILE_MANAGEMENT is the exception and stays visible: profiles are state an unpaired client still
@@ -77,6 +83,11 @@ enum class ElementType(
     // An aapsclient has no real pump (VirtualPump is hidden). NOT gated on pairing (a paired client still
     // has no pump), so this is plain !isClient, distinct from MASTER_OR_PAIRED_CLIENT.
     PUMP(category = ElementCategory.SYSTEM, visibility = ElementVisibility { !it.isClient }),
+
+    // The active CGM/BG-source plugin's own screen (glucose history, its own settings) — same !isClient
+    // rule as PUMP, for the same reason: an aapsclient doesn't run the real sensor connection itself, it
+    // only receives synced glucose values.
+    BGSOURCE(category = ElementCategory.SYSTEM, visibility = ElementVisibility { !it.isClient }),
     SETTINGS(category = ElementCategory.SYSTEM, protection = ProtectionCheck.Protection.PREFERENCES),
     QUICK_LAUNCH_CONFIG(category = ElementCategory.SYSTEM, searchable = true),
 

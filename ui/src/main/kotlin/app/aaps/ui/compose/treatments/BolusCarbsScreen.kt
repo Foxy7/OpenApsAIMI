@@ -44,11 +44,14 @@ import app.aaps.core.data.time.T
 import app.aaps.core.interfaces.profile.Profile
 import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.objects.extensions.iobCalc
-import app.aaps.core.ui.compose.AapsCard
+import app.aaps.core.objects.extensions.looksInhaled
 import app.aaps.core.ui.compose.AapsTheme
 import app.aaps.core.ui.compose.LocalDateUtil
 import app.aaps.core.ui.compose.ToolbarConfig
 import app.aaps.core.ui.compose.dialogs.OkCancelDialog
+import app.aaps.core.ui.compose.glass.GlassCard
+import app.aaps.core.ui.compose.glass.GlassColors
+import app.aaps.core.ui.compose.glass.isGlassDarkMode
 import app.aaps.core.ui.compose.icons.Ns
 import app.aaps.core.ui.compose.icons.Pump
 import app.aaps.core.interfaces.navigation.ElementType
@@ -56,6 +59,7 @@ import app.aaps.core.ui.compose.navigation.color
 import app.aaps.core.ui.compose.navigation.icon
 import app.aaps.ui.compose.components.ContentContainer
 import app.aaps.ui.compose.treatments.viewmodels.BolusCarbsViewModel
+import app.aaps.core.ui.R as CoreUiR
 
 /**
  * Composable screen displaying boluses and carbs in a combined list.
@@ -72,6 +76,7 @@ fun BolusCarbsScreen(
     onNavigateBack: () -> Unit = { }
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val isDark = isGlassDarkMode()
 
     // Dialog state
     var showDeleteDialog by remember { mutableStateOf(false) }
@@ -121,7 +126,9 @@ fun BolusCarbsScreen(
         Box(modifier = Modifier.fillMaxSize()) {
             ContentContainer(
                 isLoading = uiState.isLoading,
-                isEmpty = uiState.mealLinks.isEmpty()
+                isEmpty = uiState.mealLinks.isEmpty(),
+                emptyIconTint = GlassColors.textMuted(isDark).copy(alpha = 0.6f),
+                emptyTextColor = GlassColors.textMuted(isDark)
             ) {
                 val haptic = LocalHapticFeedback.current
 
@@ -130,6 +137,8 @@ fun BolusCarbsScreen(
                     getTimestamp = { it.bolusCalculatorResult?.timestamp ?: it.bolus?.timestamp ?: it.carbs?.timestamp ?: 0L },
                     getItemKey = { "b${it.bolus?.id}_c${it.carbs?.id}_bcr${it.bolusCalculatorResult?.id}" },
                     rh = viewModel.rh,
+                    headerBackgroundColor = GlassColors.screenBgTop(isDark),
+                    headerTextColor = GlassColors.skyBlue,
                     itemContent = { ml ->
                         MealLinkItem(
                             mealLink = ml,
@@ -188,8 +197,10 @@ private fun MealLinkItem(
     rh: ResourceHelper,
     showInvalidated: Boolean
 ) {
+    val isDark = isGlassDarkMode()
     val dateUtil = LocalDateUtil.current
-    AapsCard(
+    GlassCard(
+        isDark = isDark,
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 2.dp)
@@ -264,7 +275,7 @@ private fun MealLinkItem(
                         Text(
                             text = dateUtil.timeString(bolus.timestamp),
                             fontSize = 14.sp,
-                            color = if (bolus.timestamp > dateUtil.now()) Color(AapsTheme.generalColors.futureRecord.value) else MaterialTheme.colorScheme.onSurface
+                            color = if (bolus.timestamp > dateUtil.now()) Color(AapsTheme.generalColors.futureRecord.value) else GlassColors.textBright(isDark)
                         )
 
                         // Bolus amount with IOB
@@ -309,16 +320,19 @@ private fun MealLinkItem(
                             )
                         }
 
-                        // Insulin label (when different from active). The running profile owns the
-                        // authoritative iCfg; with no profile there is nothing to compare against, so
-                        // the label is shown rather than suppressed against a guessed "active".
+                        val isAfrezzaDose = bolus.iCfg.looksInhaled()
+
+                        // Insulin label (when different from active) — skipped for Afrezza, whose
+                        // type label already says so. The running profile owns the authoritative
+                        // iCfg; with no profile there is nothing to compare against, so the label is
+                        // shown rather than suppressed against a guessed "active".
                         val activeLabel = profile?.iCfg?.insulinLabel
-                        if (bolus.iCfg.insulinLabel != activeLabel) {
+                        if (!isAfrezzaDose && bolus.iCfg.insulinLabel != activeLabel) {
                             Text(
                                 text = bolus.iCfg.insulinLabel,
                                 modifier = Modifier.padding(start = 4.dp),
                                 fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = GlassColors.textMuted(isDark)
                             )
                         }
 
@@ -326,14 +340,18 @@ private fun MealLinkItem(
 
                         // Bolus type — pre-migration text label (the legacy view showed "SMB" / "Meal Bolus" /
                         // "Prime/Fill" here; a carbs icon on a normal/correction bolus was misleading).
+                        // Afrezza is stored as BS.Type.NORMAL but is inhaled, not pump-delivered, so it
+                        // gets its own label instead of "Meal Bolus".
                         Text(
-                            text = when (bolus.type) {
-                                BS.Type.SMB     -> stringResource(app.aaps.core.ui.R.string.smb_shortname)
-                                BS.Type.NORMAL  -> stringResource(app.aaps.core.ui.R.string.careportal_mealbolus)
-                                BS.Type.PRIMING -> stringResource(app.aaps.core.ui.R.string.prime_fill)
+                            text = when {
+                                isAfrezzaDose                 -> stringResource(CoreUiR.string.afrezza_type_shortname)
+                                bolus.type == BS.Type.SMB     -> stringResource(CoreUiR.string.smb_shortname)
+                                bolus.type == BS.Type.NORMAL  -> stringResource(CoreUiR.string.careportal_mealbolus)
+                                bolus.type == BS.Type.PRIMING -> stringResource(CoreUiR.string.prime_fill)
+                                else                          -> stringResource(CoreUiR.string.careportal_mealbolus)
                             },
                             fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = GlassColors.textMuted(isDark)
                         )
 
                         if (bolus.ids.nightscoutId != null) {

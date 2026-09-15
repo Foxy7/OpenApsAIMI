@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="cancel_action_with_details" comment="%1$s=the word Cancel, %2$s=the active item being cancelled (e.g. a running temp basal or extended bolus description). Example: 'Cancel 150% 30min'">%1$s %2$s</string>
+    <string name="graph_point_value_time" comment="Tooltip shown when tapping a point on a chart. %1$s=the value at that point with its unit (e.g. glucose or IOB), %2$s=time of day (HH:mm). Example: '120 mg/dL 14:32'">%1$s %2$s</string>
     <string name="no_temp_basal_running">No temp basal running</string>
     <string name="start_activity_tt">Start Activity TT</string>
     <string name="start_eating_soon_tt">Start Eating soon TT</string>
@@ -334,6 +335,10 @@
     <string name="cal_precheck_delta_too_high">Glucose is changing too fast (Δ %1$s %3$s per 5 min, limit %2$s). Wait for stability.</string>
     <string name="cal_precheck_mark_sensor_change">Mark sensor change</string>
 
+    <!-- Calibration entry accepted, but the sensor value is not corrected yet -->
+    <string name="cal_saved_need_more_entries" comment="%1$d=number of valid fingerstick entries recorded so far for the current sensor session (always less than 2 when this shows)">Calibration saved. It will take effect once you add one more fingerstick entry for this sensor (currently %1$d).</string>
+    <string name="cal_saved_unsafe_fit">Calibration saved, but the calculated correction is outside the safe range, so it was not applied. Add another entry, or check your fingerstick value.</string>
+
     <!-- Afrezza Inhaled Insulin -->
     <string name="log_afrezza_dose">Log Afrezza Dose</string>
     <string name="afrezza_confirm_log">Log %1$dU Afrezza?</string>
@@ -342,17 +347,17 @@
     <string name="afrezza_not_configured">Add Afrezza insulin in Insulin Management first</string>
     <string name="afrezza_confirm_title" comment="Dialog title when confirming an Afrezza cartridge dose">Confirm Afrezza Dose</string>
     <string name="afrezza_select_dose" comment="Title for the Afrezza cartridge picker">Select Afrezza Dose</string>
-    <string name="afrezza_max_basal_title" comment="Prompt after logging Afrezza: offer temporary elevated basal">Apply Max Basal?</string>
-    <string name="afrezza_max_basal_message" comment="%1$s=basal rate in U/h. Example: Set temporary basal rate to 2.0 U/h to counter Afrezza glucose rise?">Set temporary basal rate to %1$.1f U/h to counter Afrezza glucose rise?</string>
-    <string name="afrezza_max_basal_duration" comment="Title for duration picker after accepting max basal">Select Duration</string>
-    <string name="afrezza_max_basal_rate" comment="%1$s=basal rate in U/h. Example: Max basal: 2.0 U/h">Max basal: %1$.1f U/h</string>
-    <string name="afrezza_max_basal_set" comment="%1$s=rate U/h, %2$d=duration minutes. Example: Max basal 2.0 U/h set for 120 minutes">Max basal %1$.1f U/h set for %2$d minutes</string>
-    <string name="afrezza_max_basal_failed" comment="Shown when temp basal command fails after Afrezza dose">Failed to set max basal</string>
-    <string name="afrezza_max_basal_cancelled" comment="Shown when user cancels active Afrezza max basal">Afrezza max basal cancelled</string>
-    <string name="afrezza_max_basal_active" comment="%1$s=rate U/h. Example: Max basal active: 2.0 U/h">Max basal active: %1$.1f U/h</string>
-    <string name="afrezza_max_basal_remaining" comment="%1$d=minutes left. Example: 45 min remaining">%1$d min remaining</string>
     <string name="afrezza_carb_prompt_title" comment="After Afrezza dose flow: offer bolus wizard for carbs">Enter Carbs?</string>
     <string name="afrezza_carb_prompt_message" comment="Message for carb prompt after Afrezza logging">Open the Bolus Calculator to enter carbs for this meal?</string>
-    <string name="afrezza_no_profile" comment="Cannot set temp basal without an active profile">No active profile — cannot set temp basal</string>
+
+    <!-- Eversense calibration dialog (quick launch) -->
+    <string name="eversense_calibration_dialog_reconnect_hint">Not connected to the transmitter. AAPS will connect first, so this may take up to 30 seconds.</string>
+    <string name="eversense_calibration_send_failed">Could not send the calibration. Check that the transmitter is nearby and try again.</string>
+
+    <!-- Shared by GlassNavigationBar's Bolus tab -->
+    <string name="dashboard_v2_nav_bolus">Bolus</string>
+
+    <!-- GLASS fixed navigation -->
+    <string name="dashboard_glass_nav_profiles">Profiles</string>
 
 </resources>

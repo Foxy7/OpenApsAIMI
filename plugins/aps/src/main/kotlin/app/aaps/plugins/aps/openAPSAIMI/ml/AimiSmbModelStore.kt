@@ -7,7 +7,7 @@ import java.io.File
  * SMB model persistence. Thin facade over the shared [AimiNeuralModelStore] that pins the SMB weight filename inside
  * the provided directory; the crash-safe tmp → bak → rename protocol and probe validation live in the shared store.
  */
-internal object AimiSmbModelStore {
+object AimiSmbModelStore {
 
     private const val MODEL_FILE_NAME = "aimi_smb_model.json"
 
@@ -19,4 +19,19 @@ internal object AimiSmbModelStore {
 
     fun load(dir: File, expectedInputSize: Int): AimiNeuralNetwork? =
         AimiNeuralModelStore.load(modelFile(dir), expectedInputSize)
+
+    /**
+     * Removes the stored SMB weights from [dir].
+     *
+     * Used when the weights are known to have been trained on the wrong column, so the engine falls
+     * back to the rule-based dose until a training run on a readable corpus publishes new weights.
+     * Deleting from here keeps the filename in one place; callers never build the path themselves.
+     *
+     * Returns `true` when no weight file is left behind, whether it was deleted now or already gone.
+     */
+    fun delete(dir: File): Boolean {
+        val file = modelFile(dir)
+        if (!file.exists()) return true
+        return runCatching { file.delete() }.getOrDefault(false)
+    }
 }

@@ -279,7 +279,8 @@ enum class BooleanKey(
     WearBroadcastData(key = "wear_broadcast_data", defaultValue = false, titleResId = R.string.pref_title_wear_broadcast_data, summaryResId = R.string.pref_summary_wear_broadcast_data, showInApsMode = false, showInPumpControlMode = false),
 
     EversenseCloudUploadEnabled("eversense_cloud_upload_enabled", true, R.string.eversense_cloud_upload_enabled),
-    EversenseCloudUploadToast("eversense_notif_cloud_upload_toast", true, R.string.eversense_cloud_upload_toast),
+    EversenseCloudUploadToast("eversense_notif_cloud_upload_toast", false, R.string.eversense_cloud_upload_toast, R.string.eversense_cloud_upload_toast_summary),
+    EversenseEuropeanRegion("eversense_european_region", false, R.string.eversense_european_region, R.string.eversense_european_region_summary),
     SiteRotationManagePump("site_rotation_manage_pump", defaultValue = false, titleResId = R.string.pref_title_site_rotation_manage_pump, sync = SyncSpec(SyncChannel.Cold, SyncDirection.Bidirectional)),
     SiteRotationManageCgm("site_rotation_manage_cgm", defaultValue = false, titleResId = R.string.pref_title_site_rotation_manage_cgm, sync = SyncSpec(SyncChannel.Cold, SyncDirection.Bidirectional)),
 
@@ -288,7 +289,12 @@ enum class BooleanKey(
     OApsAIMIEnableStepsFromWatch("count_steps_watch", false),
     OApsAIMIpregnancy("key_use_AimiPregnancy",false),
     OApsAIMIforcelimits("key_use_AimiForceLimits",false),
-    OApsAIMInight("OApsAIMI_Enable_night",false),
+    OApsAIMInight(
+        "OApsAIMI_Enable_night",
+        false,
+        titleResId = R.string.pref_title_oaps_aimi_night_mode,
+        summaryResId = R.string.pref_summary_oaps_aimi_night_mode,
+    ),
     OApsAIMIhoneymoon("key_use_Aimi_honeymoon",false),
     OApsxdriponeminute(key = "key_use_Aimi_xdripOM",defaultValue = false),
     OApsAIMIT3cAdaptiveBasalEnabled("key_use_aimi_t3c_adaptive_basal", true),
@@ -310,6 +316,43 @@ enum class BooleanKey(
         titleResId = R.string.pref_title_aimi_autodrive_aggressive_smb_floor,
         summaryResId = R.string.pref_summary_aimi_autodrive_aggressive_smb_floor,
         dependency = OApsAIMIautoDriveActive,
+    ),
+    /**
+     * Opt-in: while a stress signature holds, forbid the commanded insulin sensitivity from falling
+     * under the profile sensitivity of this time of day.
+     *
+     * The signature is heart rate at least 20 bpm over resting, fewer than 100 steps in the last
+     * 15 min, held without a break for at least 10 min. It is evaluated 24 hours a day, with no time
+     * window. The gesture only ever **raises** the commanded sensitivity, which makes every prediction
+     * attribute a larger effect to the insulin already on board, so it can only make a dose smaller.
+     *
+     * The verdict is computed and exported on every tick even when this key is false, so the effect can
+     * be measured before the gesture is armed. See `StressIsfFloor`.
+     */
+    OApsAIMIStressIsfFloor(
+        key = "key_aimi_stress_isf_floor",
+        defaultValue = false,
+        titleResId = R.string.pref_title_aimi_stress_isf_floor,
+        summaryResId = R.string.pref_summary_aimi_stress_isf_floor,
+    ),
+    /**
+     * Opt-in: refuse a **bolus** that repeats the ceiling dose during a fast rise.
+     *
+     * Refuses only when both conditions of `RiseCeilingGuard` hold: the bolus has come out exactly
+     * at a configured ceiling for 3 ticks in a row, and glucose is rising by at least 8 mg/dL per
+     * 5 min. The first doses of a rise are never touched, only the ones sent while the earlier ones
+     * cannot yet be seen.
+     *
+     * Bolus channel only: the temporary basal command is untouched. The verdict is computed and
+     * exported on every tick even when this key is false, so the effect can be measured before the
+     * gesture is armed — the thresholds were chosen after seeing the data and still need a
+     * measurement made in advance.
+     */
+    OApsAIMIRiseCeilingGuard(
+        key = "key_aimi_rise_ceiling_guard",
+        defaultValue = false,
+        titleResId = R.string.pref_title_aimi_rise_ceiling_guard,
+        summaryResId = R.string.pref_summary_aimi_rise_ceiling_guard,
     ),
     /**
      * Opt-in: sensor-driven effort protection. Caps SMB when steps/HR indicate current or recent

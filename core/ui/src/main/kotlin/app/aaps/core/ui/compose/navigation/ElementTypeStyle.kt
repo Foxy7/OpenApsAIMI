@@ -27,6 +27,7 @@ import app.aaps.core.ui.compose.icons.IcCarbs
 import app.aaps.core.ui.compose.icons.IcCgmInsert
 import app.aaps.core.ui.compose.icons.IcClinicalNotes
 import app.aaps.core.ui.compose.icons.IcExtendedBolus
+import app.aaps.core.ui.compose.icons.IcGenericCgm
 import app.aaps.core.ui.compose.icons.IcHistory
 import app.aaps.core.ui.compose.icons.IcLoopClosed
 import app.aaps.core.ui.compose.icons.IcNote
@@ -71,7 +72,8 @@ fun ElementType.color(): Color = when (this) {
 
     ElementType.CGM_XDRIP               -> AapsTheme.elementColors.cgmXdrip
     ElementType.CGM_DEX                 -> AapsTheme.elementColors.cgmDex
-    ElementType.CALIBRATION             -> AapsTheme.elementColors.calibration
+    ElementType.CALIBRATION,
+    ElementType.EVERSENSE_CALIBRATION   -> AapsTheme.elementColors.calibration
     ElementType.INSULIN_MANAGEMENT      -> AapsTheme.elementColors.insulin
 
     ElementType.PROFILE_MANAGEMENT      -> AapsTheme.elementColors.profileSwitch
@@ -95,6 +97,7 @@ fun ElementType.color(): Color = when (this) {
     ElementType.AUTOMATION_MANAGEMENT   -> AapsTheme.elementColors.automation
 
     ElementType.PUMP                    -> AapsTheme.elementColors.pump
+    ElementType.BGSOURCE                -> AapsTheme.elementColors.deviceMaintenance
     ElementType.SETTINGS,
     ElementType.QUICK_LAUNCH_CONFIG     -> AapsTheme.elementColors.settings
 
@@ -138,7 +141,8 @@ fun ElementType.icon(): ImageVector = when (this) {
     ElementType.TREATMENT               -> Icons.Default.Add
     ElementType.CGM_XDRIP               -> IcXDrip
     ElementType.CGM_DEX                 -> IcByoda
-    ElementType.CALIBRATION             -> IcCalibration
+    ElementType.CALIBRATION,
+    ElementType.EVERSENSE_CALIBRATION   -> IcCalibration
     ElementType.INSULIN_MANAGEMENT      -> IcPluginInsulin
 
     ElementType.PROFILE_MANAGEMENT      -> IcProfile
@@ -161,6 +165,7 @@ fun ElementType.icon(): ImageVector = when (this) {
     ElementType.AUTOMATION_MANAGEMENT   -> IcPluginAutomation
 
     ElementType.PUMP                    -> Pump
+    ElementType.BGSOURCE                -> IcGenericCgm
     ElementType.SETTINGS                -> Icons.Default.Settings
     ElementType.QUICK_LAUNCH_CONFIG     -> Icons.Default.Settings
     ElementType.TREATMENTS              -> IcClinicalNotes
@@ -211,6 +216,7 @@ fun ElementType.labelResId(): Int = when (this) {
     ElementType.CGM_XDRIP               -> R.string.cgm
     ElementType.CGM_DEX                 -> R.string.cgm
     ElementType.CALIBRATION             -> R.string.calibration
+    ElementType.EVERSENSE_CALIBRATION   -> R.string.eversense_calibration_label
     ElementType.INSULIN_MANAGEMENT      -> R.string.insulin_management
     ElementType.PROFILE_MANAGEMENT      -> R.string.profile_management
     ElementType.TEMP_TARGET_MANAGEMENT  -> R.string.temp_target_management
@@ -229,6 +235,7 @@ fun ElementType.labelResId(): Int = when (this) {
     ElementType.AUTOMATION              -> 0 // dynamic label
     ElementType.AUTOMATION_MANAGEMENT   -> R.string.automation
     ElementType.PUMP                    -> R.string.pump
+    ElementType.BGSOURCE                -> R.string.cgm
     ElementType.SETTINGS                -> R.string.settings
     ElementType.QUICK_LAUNCH_CONFIG     -> R.string.quick_launch_configure
     ElementType.TREATMENTS              -> R.string.treatments_history
@@ -274,6 +281,7 @@ fun ElementType.descriptionResId(): Int = when (this) {
     ElementType.CGM_DEX                 -> R.string.treatment_cgm_desc
 
     ElementType.CALIBRATION             -> R.string.treatment_calibration_desc
+    ElementType.EVERSENSE_CALIBRATION   -> R.string.treatment_eversense_calibration_desc
     ElementType.BG_CHECK                -> R.string.treatment_bg_check_desc
     ElementType.EXERCISE                -> R.string.treatment_exercise_desc
     ElementType.ANNOUNCEMENT            -> R.string.treatment_announcement_desc
@@ -300,6 +308,7 @@ fun ElementType.descriptionResId(): Int = when (this) {
     ElementType.RUNNING_MODE,
     ElementType.AUTOMATION,
     ElementType.PUMP,
+    ElementType.BGSOURCE,
     ElementType.SETTINGS,
     ElementType.COB,
     ElementType.SENSITIVITY,

@@ -437,8 +437,6 @@
 
     <!-- DoubleKey: APS preferences -->
     <string name="pref_title_max_basal">Maximum basal rate</string>
-    <string name="pref_title_afrezza_max_basal_rate">Afrezza max basal rate</string>
-    <string name="pref_summary_afrezza_max_basal_rate">Minimum basal rate enforced after Afrezza dosing (U/h)</string>
     <string name="openapsma_max_basal_summary">This value is called max basal in OpenAPS context</string>
     <string name="pref_title_smb_max_iob">Max IOB for SMB</string>
     <string name="openapssmb_max_iob_summary">This value is called Max IOB in OpenAPS context\nOpenAPS will not add more insulin if current IOB is greater than this value. Value is affected by patient type too.</string>
@@ -519,6 +517,8 @@
     <string name="key_oaps_aimi_highBG_interval">key_oaps_aimi_highBG_interval</string>
     <string name="key_openapsaimi_high_bg_max_smb">key_openapsaimi_high_bg_max_smb</string>
     <string name="OApsAIMI_Enable_night">OApsAIMI_Enable_night</string>
+    <string name="pref_title_oaps_aimi_night_mode">Night mode: shorter SMB interval at 23:00</string>
+    <string name="pref_summary_oaps_aimi_night_mode">During the 23:00 hour, SMB may be given a little more often when glucose is not rising fast and insulin on board is below the SMB limit. This does not make night SMB smaller.</string>
     <string name="key_oaps_aimi_lunchAdjFact">key_oaps_aimi_lunchAdjFact</string>
     <string name="key_oaps_aimi_dinnerAdjFact">key_oaps_aimi_dinnerAdjFact</string>
     <string name="key_oaps_aimi_lunch_interval">key_oaps_aimi_lunch_interval</string>
@@ -594,6 +594,10 @@
     <string name="pref_summary_aimi_autodrive_v3_authoritative">When Autodrive V3 is active and issues a safe SMB/TBR, do not recompute SMB with the legacy MPC/PI blender (prevents post-hypo overshoot). Disable only for debugging.</string>
     <string name="pref_title_aimi_autodrive_aggressive_smb_floor">Aggressive-rise SMB floor</string>
     <string name="pref_summary_aimi_autodrive_aggressive_smb_floor">On a confirmed aggressive rise, guarantee at least the user-defined Autodrive prebolus amount, delivered as a floor on top of the model SMB. Always re-bounded by Autodrive V3 safety (post-hypo, max SMB, IOB headroom, correction aggression).</string>
+    <string name="pref_title_aimi_rise_ceiling_guard">Stop repeating the biggest bolus while glucose climbs</string>
+    <string name="pref_summary_aimi_rise_ceiling_guard">When glucose climbs fast, the loop can send its biggest allowed bolus again and again, once a minute. Insulin takes 20 to 40 minutes to show, so it can send ten of them before the first one can be seen, and everything sent is still to come once the rise stops. This setting refuses those repeats: after the bolus has come out at its maximum 3 times in a row while glucose is rising by at least 8 mg/dL every 5 minutes, the next ones are held back. The first doses of a rise are never touched, and the temporary basal rate is not changed. Off by default. This switch changes your doses: when it is on, boluses are really held back during a fast rise, and you may run higher after a meal. When it is off, nothing is held back; the verdict is only written to the exported data, so you can measure what it would have done before you turn it on.</string>
+    <string name="pref_title_aimi_stress_isf_floor">Stress ISF floor</string>
+    <string name="pref_summary_aimi_stress_isf_floor">When you are under stress, keep the insulin sensitivity used by the loop at or above your profile value, instead of letting it drift below. Stress is detected only from the watch: heart rate at least 20 bpm above your resting rate, fewer than 250 steps in the last 15 minutes, and both held without a break for at least 10 minutes. Once it is on, it stays on until the signs have been gone for 5 minutes, so a few steps do not turn it off and on again. It works at any hour of the day or night. When it is on, it can only make doses smaller, never larger, because a higher sensitivity means the loop expects more from the insulin already active. When it is off, the same check still runs and is written to the log, but nothing in your therapy changes. If the heart rate or the resting heart rate is missing, the floor stays off.</string>
     <string name="pref_title_aimi_effort_activity_protection">Effort/activity SMB protection</string>
     <string name="pref_summary_aimi_effort_activity_protection">Lower SMB when steps and heart rate show current or recent physical effort, even if no activity was declared in AIMI Context. Protection persists for a while after you stop (post-exercise sensitivity) and is skipped when the signals look like stress rather than exercise. Reduction-only.</string>
     <string name="pref_title_aimi_hyper_trajectory_release">Hyper trajectory SMB release (HTR)</string>
@@ -664,7 +668,10 @@
 
     <string name="eversense_use_smoothing">Use ESEL smoothing</string>
     <string name="eversense_cloud_upload_enabled">Enable Eversense cloud upload</string>
-    <string name="eversense_cloud_upload_toast">Show cloud upload result</string>
+    <string name="eversense_cloud_upload_toast">Show a message after each upload</string>
+    <string name="eversense_cloud_upload_toast_summary">Shows a short message on the screen every time your readings are sent to the Eversense servers. This happens about every 5 minutes, so most people leave this off. Turn it on only while you are checking that the upload works.</string>
+    <string name="eversense_european_region">Eversense 365: use European servers</string>
+    <string name="eversense_european_region_summary">Turn this on if your Eversense account and 365 transmitter are European. AAPS will then sign in and sync with the European Eversense servers instead of the ones in the United States. Leave it off for a United States account. If this is set wrong, the transmitter cannot finish pairing and you will get no readings.</string>
     <string name="pref_title_aimi_basal_slew_limit">Basal anti-whiplash (slew limit)</string>
     <string name="pref_summary_aimi_basal_slew_limit">Limit how fast the basal rate can rise each cycle to smooth out over-corrections. Basal cuts stay instant for hypo safety; meal and forced-boost paths are exempt.</string>
     <string name="pref_title_aimi_pkpd_endo_reversion">Prediction: endogenous reversion</string>

@@ -24,11 +24,13 @@ import app.aaps.plugins.eversense.packets.e365.GetSignalStrengthPacket
 import app.aaps.plugins.eversense.packets.e365.SetBloodGlucosePointPacket365
 import app.aaps.plugins.eversense.packets.e3.GetCalibrationReadinessPacket
 import app.aaps.plugins.eversense.packets.e3.GetSignalStrengthRawPacket
+import app.aaps.plugins.eversense.util.EversenseCrypto365Util
 import app.aaps.plugins.eversense.util.EversenseLogger
 import app.aaps.plugins.eversense.util.EversenseScanner
 import app.aaps.plugins.eversense.util.StorageKeys
 import kotlinx.serialization.json.Json
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.TimeUnit
 
 class EversenseCGMPlugin {
 
@@ -159,7 +161,25 @@ class EversenseCGMPlugin {
                 // Save address so we can auto-reconnect after app restart or phone reboot
                 preferences?.edit()?.putString(StorageKeys.REMOTE_DEVICE_KEY, device.address)?.apply()
                 EversenseLogger.info(TAG, "Saved device address for auto-reconnect: ${device.address}")
-                device.connectGatt(context, true, gattCallback, android.bluetooth.BluetoothDevice.TRANSPORT_LE)
+                // A transmitter picked from the scan list is not necessarily the one the cached
+                // "shortcut auth" session was agreed with. canUseShortcut() is a plain saved flag,
+                // it is not tied to any transmitter identity, so for newly picked hardware the
+                // cached shortcut is wrong. Without this, the 365 auth flow tries it anyway, the
+                // new transmitter rejects it and drops the link, and we only recover after
+                // SHORTCUT_FAIL_THRESHOLD (3) failed connect/auth/disconnect cycles. Ask for the
+                // full WhoAmI + DMS login + fleet certificate handshake on the first attempt
+                // instead. E3 is unaffected: its auth flow has no shortcut.
+                preferences?.let { EversenseCrypto365Util(it).disallowUseShortcut() }
+                // autoConnect = false here, unlike the stored-device branch below. This device was
+                // just found by an active scan and has never been bonded or connected before.
+                // autoConnect = true asks Android to connect "whenever the device shows up", which
+                // is meant for a device it already knows. For a brand new device it is a known way
+                // to get no GATT callback and no pairing prompt at all, silently and forever.
+                // false asks for one direct connection attempt right now, which is what we want
+                // for a first pairing. If that attempt fails, onConnectionStateChange fires with a
+                // real status and scheduleReconnect() retries through the stored-device branch,
+                // which still uses autoConnect = true.
+                device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
                 true
             } else {
                 val address = preferences?.getString(StorageKeys.REMOTE_DEVICE_KEY, null) ?: run {
@@ -171,7 +191,7 @@ class EversenseCGMPlugin {
                     return false
                 }
                 EversenseLogger.info(TAG, "Reconnecting to stored device: $address")
-                remoteDevice.connectGatt(context, true, gattCallback, android.bluetooth.BluetoothDevice.TRANSPORT_LE)
+                remoteDevice.connectGatt(context, true, gattCallback, BluetoothDevice.TRANSPORT_LE)
                 true
             }
         }
@@ -219,31 +239,60 @@ class EversenseCGMPlugin {
      * Must be called from a background thread as it performs a BLE write.
      */
     fun setDiagnosticMode(isEnabled: Boolean) {
-        // Diagnostic mode increases signal-strength update frequency for placement guide.
-        // E3 uses Enter/ExitDiagnosticMode commands.
-        // 365 uses Operation packets with enter/exit operation IDs.
-        if (gattCallback?.isConnected() != true) {
+        val gattCallback = this.gattCallback ?: run {
+            EversenseLogger.warning(TAG, "Cannot set diagnostic mode — no gattCallback")
+            return
+        }
+        if (!gattCallback.isConnected()) {
             EversenseLogger.warning(TAG, "Cannot set diagnostic mode — not connected")
             return
         }
         try {
-            if (gattCallback?.is365() == true) {
-                if (isEnabled) {
-                    gattCallback!!.writePacket<EnterDiagnosticMode365Packet.Response>(EnterDiagnosticMode365Packet())
-                } else {
-                    gattCallback!!.writePacket<ExitDiagnosticMode365Packet.Response>(ExitDiagnosticMode365Packet())
-                }
-                EversenseLogger.info(TAG, "Diagnostic mode set to $isEnabled (365)")
-            } else {
-                if (isEnabled) {
-                    gattCallback!!.writePacket<EnterDiagnosticModePacket.Response>(EnterDiagnosticModePacket())
-                } else {
-                    gattCallback!!.writePacket<ExitDiagnosticModePacket.Response>(ExitDiagnosticModePacket())
-                }
-                EversenseLogger.info(TAG, "Diagnostic mode set to $isEnabled (E3)")
-            }
+            // Run on the bleExecutor, like every other write, so this cannot race a write that
+            // the Keep Alive sync cycle already started.
+            val future = gattCallback.submitToExecutor { writeDiagnosticMode(gattCallback, isEnabled) }
+            future.get(BLE_TASK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         } catch (e: Exception) {
             EversenseLogger.warning(TAG, "setDiagnosticMode failed: $e")
+        }
+    }
+
+    /**
+     * Same as [setDiagnosticMode], but for callers that already run on the bleExecutor thread.
+     * The bleExecutor has one thread only, so such a caller must never submit a task and then
+     * wait for it: the new task cannot start until the caller returns.
+     */
+    fun setDiagnosticModeOnExecutor(isEnabled: Boolean) {
+        val gattCallback = this.gattCallback ?: run {
+            EversenseLogger.warning(TAG, "Cannot set diagnostic mode — no gattCallback")
+            return
+        }
+        try {
+            writeDiagnosticMode(gattCallback, isEnabled)
+        } catch (e: Exception) {
+            EversenseLogger.warning(TAG, "setDiagnosticModeOnExecutor failed: $e")
+        }
+    }
+
+    // Writes the enter/exit diagnostic mode packets. Must run on the bleExecutor thread.
+    // Diagnostic mode increases how often the transmitter reports signal strength, which the
+    // placement guide needs. E3 uses Enter/ExitDiagnosticMode commands; 365 uses Operation
+    // packets with enter/exit operation IDs.
+    private fun writeDiagnosticMode(gattCallback: EversenseGattCallback, isEnabled: Boolean) {
+        if (gattCallback.is365()) {
+            if (isEnabled) {
+                gattCallback.writePacket<EnterDiagnosticMode365Packet.Response>(EnterDiagnosticMode365Packet())
+            } else {
+                gattCallback.writePacket<ExitDiagnosticMode365Packet.Response>(ExitDiagnosticMode365Packet())
+            }
+            EversenseLogger.info(TAG, "Diagnostic mode set to $isEnabled (365)")
+        } else {
+            if (isEnabled) {
+                gattCallback.writePacket<EnterDiagnosticModePacket.Response>(EnterDiagnosticModePacket())
+            } else {
+                gattCallback.writePacket<ExitDiagnosticModePacket.Response>(ExitDiagnosticModePacket())
+            }
+            EversenseLogger.info(TAG, "Diagnostic mode set to $isEnabled (E3)")
         }
     }
 
@@ -289,7 +338,7 @@ class EversenseCGMPlugin {
                     EversenseE3Communicator.sendCalibration(gattCallback, glucoseMgDl)
                 }
             }
-            future.get(20_000, java.util.concurrent.TimeUnit.MILLISECONDS)
+            future.get(BLE_TASK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             val prefs = preferences ?: return true
             val stateJson = prefs.getString(StorageKeys.STATE, null) ?: "{}"
             val updatedState = JSON.decodeFromString<EversenseState>(stateJson)
@@ -347,7 +396,8 @@ class EversenseCGMPlugin {
         }
         gattCallback.submitToExecutor {
             if (isPositioningMode) {
-                setDiagnosticMode(true)
+                // Already on the bleExecutor thread here, so write directly.
+                setDiagnosticModeOnExecutor(true)
                 EversenseLogger.info(TAG, "Re-enabled Diagnostic Mode after reconnect")
             }
             EversenseLogger.info(TAG, "Running E3 fullSync on bleExecutor after connect")
@@ -403,14 +453,20 @@ class EversenseCGMPlugin {
         val preferences = this.preferences ?: run { EversenseLogger.error(TAG, "Cannot read signal strength — no preferences"); return }
         if (!gattCallback.isConnected()) { EversenseLogger.warning(TAG, "Cannot read signal strength — not connected"); return }
         try {
-            val signalStrength = if (gattCallback.is365()) {
-                val response = gattCallback.writePacket<GetSignalStrengthPacket.Response>(GetSignalStrengthPacket())
-                response.signalStrength
-            } else {
-                val response = gattCallback.writePacket<GetSignalStrengthRawPacket.Response>(GetSignalStrengthRawPacket())
-                EversenseLogger.info(TAG, "E3 signal raw: ${response.rawValue} -> ${response.signalStrength}%")
-                response.signalStrength
+            // Run on the bleExecutor, like every other write, so this cannot race a write that
+            // the Keep Alive sync cycle already started.
+            // Callers must not be on the bleExecutor thread — see submitToExecutor.
+            val future = gattCallback.submitToExecutor {
+                if (gattCallback.is365()) {
+                    val response = gattCallback.writePacket<GetSignalStrengthPacket.Response>(GetSignalStrengthPacket())
+                    response.signalStrength
+                } else {
+                    val response = gattCallback.writePacket<GetSignalStrengthRawPacket.Response>(GetSignalStrengthRawPacket())
+                    EversenseLogger.info(TAG, "E3 signal raw: ${response.rawValue} -> ${response.signalStrength}%")
+                    response.signalStrength
+                }
             }
+            val signalStrength = future.get(BLE_TASK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             val stateJson = preferences.getString(StorageKeys.STATE, null) ?: "{}"
             val state = JSON.decodeFromString<EversenseState>(stateJson)
             state.sensorSignalStrength = signalStrength
@@ -438,6 +494,9 @@ class EversenseCGMPlugin {
 
     companion object {
         private const val TAG = "EversenseCGMManager"
+
+        // How long a caller waits for a task it queued on the single-threaded bleExecutor.
+        private const val BLE_TASK_TIMEOUT_MS = 20_000L
 
         // ignoreUnknownKeys: tolerates firmware version differences between E3 and 365 transmitters.
         private val JSON = Json { ignoreUnknownKeys = true }

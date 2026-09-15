@@ -14,7 +14,11 @@ import dagger.hilt.android.AndroidEntryPoint
 import app.aaps.plugins.source.R
 import app.aaps.plugins.eversense.EversenseCGMPlugin
 import app.aaps.plugins.eversense.callbacks.EversenseScanCallback
+import app.aaps.plugins.eversense.callbacks.EversenseWatcher
+import app.aaps.plugins.eversense.enums.EversenseType
+import app.aaps.plugins.eversense.models.EversenseCGMResult
 import app.aaps.plugins.eversense.models.EversenseScanResult
+import app.aaps.plugins.eversense.models.EversenseState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -24,7 +28,7 @@ import java.util.Date
 import java.util.Locale
 
 @AndroidEntryPoint
-class EversenseStatusActivity : AppCompatActivity() {
+class EversenseStatusActivity : AppCompatActivity(), EversenseWatcher {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -46,6 +50,10 @@ class EversenseStatusActivity : AppCompatActivity() {
             handleConnectTap()
         }
 
+        findViewById<Button>(R.id.eversense_btn_change_transmitter).setOnClickListener {
+            handleChangeTransmitterTap()
+        }
+
         findViewById<Button>(R.id.eversense_btn_sync).setOnClickListener {
             if (eversense.isConnected()) {
                 ioScope.launch { eversense.triggerFullSync(force = true) }
@@ -53,6 +61,39 @@ class EversenseStatusActivity : AppCompatActivity() {
             }
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+        // Safe to call every time: addWatcher() skips a watcher that is already in the list.
+        eversense.addWatcher(this)
+        // Pick up anything that changed while this screen was not visible.
+        updateStatus()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        eversense.removeWatcher(this)
+    }
+
+    // EversenseWatcher: redraw as soon as the link, the auth handshake or the state changes.
+    override fun onConnectionChanged(connected: Boolean) {
+        mainHandler.post { updateStatus() }
+    }
+
+    override fun onStateChanged(state: EversenseState) {
+        mainHandler.post { updateStatus() }
+    }
+
+    // isConnected() is "BLE link up AND transmitter ready", two separate flags.
+    // onConnectionChanged(true) fires as soon as the raw BLE link comes up, while the auth
+    // handshake is still running, so isConnected() is still false and the screen draws the red
+    // cross. The second flag flips later, and that moment is reported through onTransmitterReady()
+    // only. Without a refresh here the screen keeps showing the red cross until it is reopened.
+    override fun onTransmitterReady() {
+        mainHandler.post { updateStatus() }
+    }
+
+    override fun onCGMRead(type: EversenseType, readings: List<EversenseCGMResult>) {}
 
     private fun updateStatus() {
         val state = eversense.getCurrentState()
@@ -87,7 +128,7 @@ class EversenseStatusActivity : AppCompatActivity() {
         if (eversense.isConnected()) {
             AlertDialog.Builder(this)
                 .setTitle(getString(R.string.eversense_scan_title))
-                .setMessage("Disconnect from transmitter?")
+                .setMessage(getString(R.string.eversense_disconnect_confirm))
                 .setPositiveButton("Disconnect") { _, _ ->
                     eversense.clearStoredDevice()
                     eversense.disconnect()
@@ -105,6 +146,26 @@ class EversenseStatusActivity : AppCompatActivity() {
                 showDeviceSelectionDialog()
             }
         }
+    }
+
+    // Forgets the stored address of the paired transmitter and scans again. This is the way to
+    // move to a replacement transmitter: handleConnectTap() only opens the scan dialog when no
+    // address is stored, so with a stored address the app would keep trying the old transmitter
+    // forever. The address is cleared BEFORE the disconnect on purpose: scheduleReconnect() in
+    // EversenseGattCallback reads that address, and with it already gone it stops instead of
+    // scheduling a reconnect to the old transmitter that would race the new one.
+    private fun handleChangeTransmitterTap() {
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.eversense_change_transmitter))
+            .setMessage(getString(R.string.eversense_change_transmitter_confirm))
+            .setPositiveButton(getString(R.string.eversense_change_transmitter)) { _, _ ->
+                eversense.clearStoredDevice()
+                if (eversense.isConnected()) eversense.disconnect()
+                updateStatus()
+                showDeviceSelectionDialog()
+            }
+            .setNegativeButton(getString(R.string.eversense_scan_cancel), null)
+            .show()
     }
 
     private fun showDeviceSelectionDialog() {

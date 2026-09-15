@@ -13,6 +13,7 @@ import app.aaps.core.data.ue.ValueWithUnit
 import app.aaps.core.interfaces.calibration.AddEntryResult
 import app.aaps.core.interfaces.calibration.Calibration
 import app.aaps.core.interfaces.calibration.CalibrationContext
+import app.aaps.core.interfaces.calibration.CalibrationStatus
 import app.aaps.core.interfaces.db.PersistenceLayer
 import app.aaps.core.interfaces.db.observeChanges
 import app.aaps.core.interfaces.iob.GlucoseStatusProvider
@@ -27,8 +28,10 @@ import app.aaps.core.interfaces.resources.ResourceHelper
 import app.aaps.core.interfaces.rx.bus.RxBus
 import app.aaps.core.interfaces.rx.events.EventCalibrationChanged
 import app.aaps.core.interfaces.utils.DateUtil
+import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.core.ui.compose.icons.IcCalibration
 import app.aaps.plugins.calibration.compose.CalibrationComposeContent
+import app.aaps.plugins.calibration.keys.CalibrationLongKey
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -47,7 +50,8 @@ class LinearCalibrationPlugin @Inject constructor(
     private val persistenceLayer: PersistenceLayer,
     private val notificationManager: NotificationManager,
     private val glucoseStatusProvider: GlucoseStatusProvider,
-    private val rxBus: RxBus
+    private val rxBus: RxBus,
+    private val preferences: Preferences
 ) : PluginBase(
     PluginDescription()
         .mainType(PluginType.CALIBRATION)
@@ -65,9 +69,22 @@ class LinearCalibrationPlugin @Inject constructor(
     @Volatile
     private var lastGapScanAt: Long = 0L
 
-    /** Break the user was already told about, so the same one is not reported again. */
+    /** Break the user was already told about, so the same one is not reported again this session. */
     @Volatile
     private var lastNotifiedGapAt: Long = 0L
+
+    /** When calibration health was last checked. See `checkCalibrationHealthAndNotify`. */
+    @Volatile
+    private var lastHealthScanAt: Long = 0L
+
+    /** Reason last told to the user (a `cal_notify_*` string resource id), so the same reason is
+     *  not re-announced on every scan. Null once resolved or not yet checked. */
+    @Volatile
+    private var lastHealthMessageRes: Int? = null
+
+    init {
+        preferences.registerPreferences(CalibrationLongKey::class.java)
+    }
 
     override suspend fun onStart() {
         super.onStart()
@@ -111,6 +128,7 @@ class LinearCalibrationPlugin @Inject constructor(
         }
 
         detectAndNotifyGap(sessionStart, now)
+        checkCalibrationHealthAndNotify(sessionStart, now)
 
         // Without a recorded SENSOR_CHANGE, entries can span multiple sensors with
         // different bias — fitting across them is unsafe. Gap detection above will
@@ -138,18 +156,40 @@ class LinearCalibrationPlugin @Inject constructor(
             return data
         }
 
+        // Blend toward identity if the newest entry has gone stale — see stalenessConfidence's
+        // KDoc. Applied only now, after both safety checks above passed on the RAW fit.
+        val confidence = stalenessConfidence(entries.maxOf { it.timestamp }, now)
+        val effective = fit.blendTowardIdentity(confidence)
+
         for (entry in data) {
             if (entry.timestamp >= sessionStart) {
-                entry.calibrated = fit.slope * entry.value + fit.offset
+                entry.calibrated = effective.slope * entry.value + effective.offset
             }
         }
         aapsLogger.debug(LTag.GLUCOSE) {
-            "LinearCalibration: slope=${fit.slope}, offset=${fit.offset}, applied to ${data.count { it.calibrated != null }}/${data.size}"
+            "LinearCalibration: slope=${effective.slope}, offset=${effective.offset}, confidence=$confidence, applied to ${data.count { it.calibrated != null }}/${data.size}"
         }
         return data
     }
 
     override suspend fun checkPreconditions(): AddEntryResult = checkPreconditionsAt(dateUtil.now())
+
+    override suspend fun status(): CalibrationStatus {
+        val now = dateUtil.now()
+        val sessionStart = persistenceLayer.getLastTherapyRecordUpToNow(TE.Type.SENSOR_CHANGE)?.timestamp
+            ?: return CalibrationStatus.NoSession
+        val warmUpEndsAt = sessionStart + T.hours(WARM_UP_HOURS).msecs()
+        if (now < warmUpEndsAt) return CalibrationStatus.WarmUp(warmUpEndsAt)
+
+        val entries = persistenceLayer.getValidCalibrationEntriesSince(sessionStart)
+        val fit = fitLinearCalibration(entries, now) ?: return CalibrationStatus.NeedMoreEntries(entries.size)
+        return when {
+            !fit.isApplicable                -> CalibrationStatus.UnsafeFit
+            fit.mode == FitMode.OffsetOnly    -> CalibrationStatus.AppliedOffsetOnly
+            fit.mode == FitMode.SlopeClamped  -> CalibrationStatus.AppliedSlopeClamped
+            else                              -> CalibrationStatus.Applied
+        }
+    }
 
     private suspend fun checkPreconditionsAt(timestamp: Long): AddEntryResult {
         val sessionStart = persistenceLayer.getLastTherapyRecordUpToNow(TE.Type.SENSOR_CHANGE)?.timestamp
@@ -162,8 +202,8 @@ class LinearCalibrationPlugin @Inject constructor(
             // fit is in place, so its magnitude scales with slope. Scale the raw-units threshold
             // by the active slope so a sensor rate of e.g. 5 mg/dL/5min (the "stable enough"
             // bar) is treated identically whether or not calibration is multiplying the signal.
-            val activeFit = fitLinearCalibration(persistenceLayer.getValidCalibrationEntriesSince(sessionStart), timestamp)
-            val effectiveThreshold = if (activeFit != null && activeFit.isApplicable) {
+            val activeFit = effectiveFit(persistenceLayer.getValidCalibrationEntriesSince(sessionStart), timestamp)
+            val effectiveThreshold = if (activeFit != null) {
                 DELTA_GATE_MGDL_PER_5MIN * activeFit.slope
             } else {
                 DELTA_GATE_MGDL_PER_5MIN
@@ -172,6 +212,17 @@ class LinearCalibrationPlugin @Inject constructor(
         }
         pairingReadings(timestamp).firstOrNull() ?: return AddEntryResult.Rejected.NoSensorPair
         return AddEntryResult.Accepted
+    }
+
+    /**
+     * The fit actually in effect right now, or null if there is none or it fails the safety-range
+     * checks. Never a stale-but-unsafe fit "aged into" looking safe: [CalibrationFit.isApplicable]
+     * is checked on the RAW fit, and staleness blending only runs afterwards.
+     */
+    private fun effectiveFit(entries: List<CAL>, now: Long): CalibrationFit? {
+        val fit = fitLinearCalibration(entries, now) ?: return null
+        if (!fit.isApplicable) return null
+        return fit.blendTowardIdentity(stalenessConfidence(entries.maxOf { it.timestamp }, now))
     }
 
     /**
@@ -233,9 +284,10 @@ class LinearCalibrationPlugin @Inject constructor(
             gapThresholdMs = T.mins(GAP_THRESHOLD_MIN).msecs(),
             notBefore = sessionStart
         ) ?: return
-        // The same break is found again on every scan until the user acts on it. Asking once is
-        // enough; a restart of AAPS asks again, which is the honest cost of keeping this in memory.
+        // The same break is found again on every scan. Asking once per session is enough.
+        // If the user said this is not a new sensor, that answer is kept across restarts.
         if (detectedAt == lastNotifiedGapAt) return
+        if (detectedAt == preferences.get(CalibrationLongKey.IgnoredSensorGapAt)) return
 
         val nearby = persistenceLayer.getTherapyEventDataFromToTime(
             from = detectedAt - SENSOR_CHANGE_PROXIMITY_MS,
@@ -251,9 +303,60 @@ class LinearCalibrationPlugin @Inject constructor(
             actions = listOf(
                 NotificationAction(R.string.sensor_change_detected_action) {
                     runBlocking { insertSensorChange(detectedAt) }
+                },
+                NotificationAction(R.string.sensor_change_detected_ignore) {
+                    preferences.put(CalibrationLongKey.IgnoredSensorGapAt, detectedAt)
                 }
             )
         )
+    }
+
+    /**
+     * Proactively tells the user when calibration needs attention, instead of only saying so once,
+     * right after they submit a fingerstick (see `CalibrationDialogViewModel.notYetEffectiveMessage`).
+     * Exactly one reason is shown at a time, most actionable first, and the notification is
+     * dismissed once the situation resolves — same spaced-scan idea as `detectAndNotifyGap`.
+     *
+     * The same reason is asked about only once, not on every scan (same idea as
+     * `detectAndNotifyGap`'s `lastNotifiedGapAt`): [NotificationManager.post] replaces the existing
+     * `CALIBRATION_HEALTH` notification with a fresh one — new timestamp, and (by default
+     * preference) a fresh Android system notification — on every call, whether or not anything
+     * actually changed. Without this check, a persisting condition (e.g. a sensor nobody
+     * recalibrated in days) reposts every [HEALTH_SCAN_INTERVAL_MS], which reads as a notification
+     * every ~30 minutes for as long as the condition holds — not the single heads-up it should be.
+     */
+    private suspend fun checkCalibrationHealthAndNotify(sessionStart: Long?, now: Long) {
+        if (now - lastHealthScanAt < HEALTH_SCAN_INTERVAL_MS) return
+        lastHealthScanAt = now
+
+        if (sessionStart == null) {
+            // detectAndNotifyGap already covers this case (offers to log a sensor change).
+            lastHealthMessageRes = null
+            notificationManager.dismiss(NotificationId.CALIBRATION_HEALTH)
+            return
+        }
+
+        val entries = persistenceLayer.getValidCalibrationEntriesSince(sessionStart)
+        val fit = fitLinearCalibration(entries, now)
+        val newestEntryAgeMs = entries.maxOfOrNull { now - it.timestamp }
+        val isStale = newestEntryAgeMs != null && newestEntryAgeMs >= T.days(STALE_CONFIDENCE_FULL_DAYS).msecs()
+
+        val messageRes = when {
+            fit == null                               -> R.string.cal_notify_need_more_entries
+            !fit.isApplicable                         -> R.string.cal_notify_unsafe_fit
+            fit.mode == FitMode.OffsetOnly && isStale  -> R.string.cal_notify_narrow_range
+            isStale                                    -> R.string.cal_notify_stale
+            else                                        -> null
+        }
+
+        if (messageRes == null) {
+            lastHealthMessageRes = null
+            notificationManager.dismiss(NotificationId.CALIBRATION_HEALTH)
+            return
+        }
+        if (messageRes == lastHealthMessageRes) return
+        lastHealthMessageRes = messageRes
+        notificationManager.post(id = NotificationId.CALIBRATION_HEALTH, text = rh.gs(messageRes))
     }
 
     private suspend fun insertSensorChange(timestamp: Long) {
@@ -291,6 +394,14 @@ class LinearCalibrationPlugin @Inject constructor(
          * an older break was either already answered or knowingly left alone.
          */
         val GAP_SCAN_WINDOW_MS = T.hours(6).msecs()
+
+        /**
+         * How often calibration health (need more entries / unsafe fit / narrow range / stale) may
+         * be checked. Slower than [GAP_SCAN_INTERVAL_MS]: none of these conditions change on a
+         * per-minute timescale, so checking every 30 minutes is plenty responsive without adding
+         * noise.
+         */
+        val HEALTH_SCAN_INTERVAL_MS = T.mins(30).msecs()
 
         // GlucoseStatus.shortAvgDelta is mg/dL per 5 min — match the unit here. 5 mg/dL / 5 min
         // ≈ 1 mg/dL / min, the conventional "stable enough to calibrate" threshold across CGM apps.
