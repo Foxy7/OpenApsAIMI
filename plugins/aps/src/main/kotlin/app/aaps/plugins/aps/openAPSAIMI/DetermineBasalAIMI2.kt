@@ -45,12 +45,15 @@ import app.aaps.plugins.aps.openAPSAIMI.basal.BasalChannelSafetyGuards
 import app.aaps.plugins.aps.openAPSAIMI.basal.BasalDecisionEngine
 import app.aaps.plugins.aps.openAPSAIMI.basal.BasalHistoryUtils
 import app.aaps.plugins.aps.openAPSAIMI.basal.BasalTerminalInvariants
+import app.aaps.plugins.aps.openAPSAIMI.basal.AnticipationBasalFloor
+import app.aaps.plugins.aps.openAPSAIMI.basal.FclMealBasal
 import app.aaps.plugins.aps.openAPSAIMI.basal.DynamicBasalController
 import app.aaps.plugins.aps.openAPSAIMI.basal.T3cAnticipation
 import app.aaps.plugins.aps.openAPSAIMI.basal.T3cAutodriveBasalBridge
 import app.aaps.plugins.aps.openAPSAIMI.basal.T3cTrajectoryContext
 import app.aaps.plugins.aps.openAPSAIMI.autodrive.models.AutoDriveState
 import app.aaps.plugins.aps.openAPSAIMI.carbs.CarbsAdvisor
+import app.aaps.plugins.aps.openAPSAIMI.ISF.HeartRateTrendIsf
 import app.aaps.plugins.aps.openAPSAIMI.ISF.CommandedIsf
 import app.aaps.plugins.aps.openAPSAIMI.ISF.ObservedSensitivityMeter
 import app.aaps.plugins.aps.openAPSAIMI.ISF.SensitivityRatioEstimator
@@ -132,6 +135,7 @@ import app.aaps.plugins.aps.openAPSAIMI.risk.AimiRiskEnvelope
 import app.aaps.plugins.aps.openAPSAIMI.risk.AimiRiskEnvelopeBuilder
 import app.aaps.plugins.aps.openAPSAIMI.risk.DecisionPredictionAuthority
 import app.aaps.plugins.aps.openAPSAIMI.risk.DecisionPredictionAuthorityResolver
+import app.aaps.plugins.aps.openAPSAIMI.risk.MealConfirmedEarlyReleaseLatch
 import app.aaps.plugins.aps.openAPSAIMI.risk.IobConsensus
 import app.aaps.plugins.aps.openAPSAIMI.risk.IobDecisionSource
 import app.aaps.plugins.aps.openAPSAIMI.risk.PredictionPathBounds
@@ -2276,6 +2280,15 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         // sur les deux qui appellent explicitement le stage. On repart d'un état non exporté à chaque tick.
         aimiDecisionExportedThisTick = false
         pendingDecisionCtxForExport = null
+        // The terminal-invariants block belongs to this tick only. It is written at ONE place, the very
+        // end of setTempBasal, and setTempBasal has four early returns before it — two of which set the
+        // rate to 0 (the forceExact hypo floor and the LGS block). Without this reset the member kept
+        // the last tick that did reach the end, and the export republished it as if it described this
+        // one. Measured on the 2026-09-16/17 export: 310 of 1443 ticks (21.5%) carried a block
+        // byte-identical to the previous tick, and on 310 of 310 the rate that reached the pump was 0 —
+        // so every one of them was a tick where setTempBasal returned early. `adjustments.basal_terminal`
+        // is read with `?.let`, so a null simply leaves the key out, which is the honest answer.
+        lastBasalTerminalTelemetry = null
         val decisionCtx = AimiDecisionContext(
             event_id = "evt_${ctx.currentTime}".also { currentTickDecisionEventId = it },
             timestamp = ctx.currentTime,
@@ -3000,12 +3013,16 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         this.lowCarbTime = therapy.lowCarbTime
         this.highCarbTime = therapy.highCarbTime
         this.mealTime = therapy.mealTime
+        this.anticipTime = therapy.anticipTime
+        this.fclTime = therapy.fclTime
         this.bfastTime = therapy.bfastTime
         this.lunchTime = therapy.lunchTime
         this.dinnerTime = therapy.dinnerTime
         this.fastingTime = therapy.fastingTime
         this.stopTime = therapy.stopTime
         this.mealruntime = therapy.getTimeElapsedSinceLastEvent("meal")
+        this.anticipruntime = therapy.getTimeElapsedSinceLastEvent("anticip")
+        this.fclruntime = therapy.getTimeElapsedSinceLastEvent("fcl")
         this.bfastruntime = therapy.getTimeElapsedSinceLastEvent("bfast")
         this.lunchruntime = therapy.getTimeElapsedSinceLastEvent("lunch")
         this.dinnerruntime = therapy.getTimeElapsedSinceLastEvent("dinner")
@@ -4486,6 +4503,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     lastUamHypothesisState?.suppressMealInterpretation != true,
             endogenousCounterRegulatory = endogenousCounterRegulatory,
             mealAbsorptionPhase = lastMealAbsorptionOutput?.phase ?: MealAbsorptionPhase.NONE,
+            mealModeActive = mealTime || bfastTime || lunchTime || dinnerTime || snackTime || highCarbTime,
         )
         lastInsulinStackingEvaluation = stackingEval
         ensureWCycleInfo()
@@ -5456,7 +5474,13 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             combinedDelta = combinedDelta.toDouble(),
             cob = ctx.mealData.mealCOB,
             uamConfidence = AimiUamHandler.confidenceOrZero(),
-            explicitMealMode = mealTime || bfastTime || lunchTime || dinnerTime || highCarbTime || snackTime,
+            // FCL is a declared meal too. Without it `implicitMealContext` is false at COB 0, so
+            // `isMealRising` (delta > 0.25) is dead and the gate falls back to the glycaemic
+            // thresholds — which under 120 mg/dL need delta > 2.0 AND no low in the last 75 min.
+            // Eating at ~100 with the target at 80, neither holds. Measured over 1443 ticks of the
+            // 2026-09-16/17 export: GateKind.MEAL_AWARE_RISE never fired once.
+            explicitMealMode = mealTime || bfastTime || lunchTime || dinnerTime || highCarbTime ||
+                snackTime || fclDeclaredThisTick(profile),
             hasRecentMealEstimate = hasRecentMealEstimate,
             minBgLookback75m = minBgInLastMinutes(AUTODRIVE_POST_HYPO_MIN_BG_LOOKBACK_MINUTES),
             estimatedRa = continuousStateEstimator.getLastRa(),
@@ -6180,6 +6204,10 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             }
 
             val hr60List = getRateForWindow(60 * 60 * 1000)
+            // The 80.0 below is a substitute, not a measurement. It stays because other readers
+            // (ActivityManager's avgHrResting) depend on a non-zero number, but anything that
+            // STRENGTHENS a dose must know the difference — see [HeartRateTrendIsf].
+            this.heartRateBaselineIsReal = hr60List.isNotEmpty()
             this.averageBeatsPerMinute60 = if (hr60List.isNotEmpty()) {
                 hr60List.map { it.beatsPerMinute.toInt() }.average()
             } else {
@@ -6198,11 +6226,28 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             averageBeatsPerMinute10 = 80.0
             averageBeatsPerMinute60 = 80.0
             averageBeatsPerMinute180 = 80.0
+            heartRateBaselineIsReal = false
         }
-        val heartRateTrend = averageBeatsPerMinute10 / averageBeatsPerMinute60
-        if (recentSteps10Minutes < 100 && heartRateTrend > 1.1 && bg > 110) {
-            this.variableSensitivity *= 0.9f
-            consoleLog.add("ISF réduit de 10% (tendance FC anormale).")
+        // 💓 Heart-rate trend — the ONE heart-rate path that strengthens a dose. It now stands down
+        // during a fast rise, where an elevated heart rate is a consequence of the rise rather than
+        // information about its cause, and on a baseline that was substituted rather than measured.
+        // See [HeartRateTrendIsf].
+        val heartRateTrendMultiplier = HeartRateTrendIsf.multiplier(
+            steps10m = recentSteps10Minutes,
+            avgBpm10 = averageBeatsPerMinute10,
+            avgBpm60 = averageBeatsPerMinute60,
+            baselineIsReal = heartRateBaselineIsReal,
+            bgMgdl = bg.toDouble(),
+            deltaMgdl5m = delta.toDouble(),
+        )
+        if (heartRateTrendMultiplier < 1.0) {
+            this.variableSensitivity *= heartRateTrendMultiplier.toFloat()
+            consoleLog.add(
+                "💓 HR_TREND_ISF x%.2f (hr10 %.0f / hr60 %.0f, steps10 %d)".format(
+                    Locale.US, heartRateTrendMultiplier,
+                    averageBeatsPerMinute10, averageBeatsPerMinute60, recentSteps10Minutes,
+                )
+            )
         }
 
         return AimiPostBasalBootstrapActivityVitals(
@@ -7066,6 +7111,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             mealPriorityContext = isAggressivePriorityContext,
             endogenousCounterRegulatory = lastPhysiologicalPhaseOutput?.phase == PhysiologicalPhase.ENDOGENOUS_COUNTER_REGULATORY,
             mealAbsorptionPhase = lastMealAbsorptionOutput?.phase ?: MealAbsorptionPhase.NONE,
+            mealModeActive = mealTime || bfastTime || lunchTime || dinnerTime || snackTime || highCarbTime,
         )
         val suppressRedCarpetRestoreV3 = stackingEvalV3.suppressRedCarpetRestore
 
@@ -9026,6 +9072,70 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             }
         }
 
+        // 🍽️ Declared-meal anticipation — see [AnticipationBasalFloor].
+        // Applied last, after the slew limiter, because a floor that the limiter can clamp away is
+        // not a floor. It only ever RAISES the rate (max of the two), and only while the note window
+        // is open, the opt-in key is on and the declaration still looks true; the gesture stands down
+        // on its own under 80 mg/dL or on a fall, and deleting the note ends it at once.
+        if (preferences.get(BooleanKey.OApsAIMIAnticipBasalFloor) && anticipTime) {
+            AnticipationBasalFloor.floorRateUph(
+                budgetU = preferences.get(DoubleKey.OApsAIMIAnticipBudgetU),
+                elapsedMinutes = anticipruntime.toDouble(),
+                profileBasalUph = b.profile.current_basal,
+                // Same ceiling the declared meal modes use, so a declaration cannot reach higher
+                // than a meal mode already can.
+                maxBasalUph = maxOf(b.profile.max_basal, preferences.get(DoubleKey.meal_modes_MaxBasal)),
+                bgMgdl = bg.toDouble(),
+                deltaMgdl5m = delta.toDouble(),
+            )?.let { floorUph ->
+                if (floorUph > finalProposedRate) {
+                    consoleLog.add(
+                        "🍽️ ANTICIP_BASAL_FLOOR: %.2f→%.2f U/h (budget %.2f U over %.0f min, elapsed %d min)".format(
+                            Locale.US, finalProposedRate, floorUph,
+                            preferences.get(DoubleKey.OApsAIMIAnticipBudgetU),
+                            AnticipationBasalFloor.WINDOW_MINUTES, anticipruntime,
+                        )
+                    )
+                    b.rT.reason.append("; 🍽️anticip ${"%.2f".format(Locale.US, floorUph)}U/h")
+                    finalProposedRate = floorUph
+                }
+            }
+        }
+
+        // 🍽️ FCL declared meal — see [FclMealBasal]. Applied here, beside the declared-meal floor and
+        // for the same two reasons: this is the last point where the rate can still be raised, and the
+        // SMB stage has already run by now, so the bolus channel stays alive. An early return from the
+        // meal-boost stage would have skipped it, which is how the declared meal modes behave and is
+        // not what was asked for here.
+        FclMealBasal.rateUph(
+            fclNoteActive = fclTime,
+            sportNoteActive = sportTime,
+            tempTargetSet = b.profile.temptargetSet,
+            // The raw profile target on purpose: it carries the temp target the person set, while the
+            // engine's own working target has already been reshaped by this point.
+            targetBgMgdl = b.profile.target_bg,
+            mealModesMaxBasalUph = preferences.get(DoubleKey.meal_modes_MaxBasal),
+            profileMaxBasalUph = b.profile.max_basal,
+            profileBasalUph = b.profile.current_basal,
+            bgMgdl = bg.toDouble(),
+            deltaMgdl5m = delta.toDouble(),
+        )?.let { floorUph ->
+            if (floorUph > finalProposedRate) {
+                consoleLog.add(
+                    "🍽️ FCL_MEAL_BASAL: %.2f→%.2f U/h (temp target %.0f mg/dL, note %d min ago)".format(
+                        Locale.US, finalProposedRate, floorUph, b.profile.target_bg, fclruntime,
+                    )
+                )
+                b.rT.reason.append("; 🍽️FCL ${"%.2f".format(Locale.US, floorUph)}U/h")
+                finalProposedRate = floorUph
+                // The same bypass the declared meal modes already use, so FCL is "lunch without the
+                // prebolus" and not a weaker version of it. It lifts one clamp only — the daily-safety
+                // one — up to max_basal. The LGS block, the DynamicBasalController brake and the
+                // max_basal hard cap inside setTempBasal all still apply.
+                finalOverrideSafetyLimits = true
+            }
+        }
+
         val finalResult = setTempBasal(
             _rate = finalProposedRate,
             duration = finalDuration,
@@ -10748,6 +10858,12 @@ class DetermineBasalaimiSMB2 @Inject constructor(
     private var averageBeatsPerMinute = 0.0
     private var averageBeatsPerMinute10 = 0.0
     private var averageBeatsPerMinute60 = 0.0
+
+    /**
+     * True when [averageBeatsPerMinute60] came from real records rather than the 80 bpm substitute.
+     * Read only by [HeartRateTrendIsf], which is the one gesture that can strengthen a dose.
+     */
+    private var heartRateBaselineIsReal = false
     private var averageBeatsPerMinute180 = 0.0
     private var eventualBG = 0.0
     private var now = System.currentTimeMillis()
@@ -11037,10 +11153,25 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             mealCertainty = lastMealCertainty,
             trunkGlobalState = lastPhysiologicalTreeSnapshot?.trunk?.globalState,
             mealConfirmedEarlyReleaseEnabled = preferences.get(BooleanKey.OApsAIMIMealConfirmedEarlyRelease),
-            combinedDeltaMgdl5m = delta.toDouble(),
+            // The smoothed combined delta, not the raw 5-minute one. The parameter has always been
+            // named for the combined signal; passing the raw delta let a single sensor step of +24
+            // satisfy the "rising" test and clear the "falling" breaker on the same tick.
+            combinedDeltaMgdl5m = tickCombinedDelta.toDouble(),
             targetBgMgdl = targetBgMgdl,
             iobU = iob.toDouble(),
             maxIobU = maxIob,
+            mcerTailLatched = mcerTailLatch.latched,
+            declaredMeal = anticipTime && preferences.get(BooleanKey.OApsAIMIAnticipMealEvidence),
+        )
+        // Carry the latch to the next tick. Done after the call because the resolver is stateless and
+        // reports the trip; it can only keep an opt-in escalation off, never raise a dose.
+        mcerTailLatch = MealConfirmedEarlyReleaseLatch.next(
+            previous = mcerTailLatch,
+            armedThisTick = decisionPrediction.mcerArmed,
+            tailTripped = decisionPrediction.mcerTailTripped,
+            bgMgdl = bg.toDouble(),
+            targetBgMgdl = targetBgMgdl,
+            iobU = iob.toDouble(),
         )
         lastDecisionPredictionAuthority = decisionPrediction
         consoleLog.add(
@@ -11119,6 +11250,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                     lastUamHypothesisState?.suppressMealInterpretation != true,
             endogenousCounterRegulatory = endogenousCounterRegulatory,
             mealAbsorptionPhase = lastMealAbsorptionOutput?.phase ?: MealAbsorptionPhase.NONE,
+            mealModeActive = mealTime || bfastTime || lunchTime || dinnerTime || snackTime || highCarbTime,
         )
         lastInsulinStackingEvaluation = stackingEval
         val refreshed = mergeRbtHyperTrajectoryRelease(
@@ -11240,6 +11372,34 @@ class DetermineBasalaimiSMB2 @Inject constructor(
     private var lowCarbTime = false
     private var highCarbTime = false
     private var mealTime = false
+
+    /** A meal the person declared with an "anticip" note; carries no prebolus. See [AnticipationBasalFloor]. */
+    private var anticipTime = false
+
+    /** Minutes since that declaration. Same type as [mealruntime], which this mirrors. */
+    private var anticipruntime: Long = 0
+
+    /**
+     * The FCL mode: a declared meal that forces the meal basal ceiling while a low temp target runs,
+     * and sends no prebolus. See [FclMealBasal].
+     */
+    private var fclTime = false
+
+    /** Minutes since that declaration. Also the activation window for the one-shot prebolus latch. */
+    private var fclruntime: Long = 0
+
+    /**
+     * Is an FCL meal declared right now. Single source of truth for the places that need it — see
+     * [FclMealBasal.declared]. Takes the profile because the raw `target_bg` is what carries the temp
+     * target the person set; the engine's own working target has already been reshaped by then.
+     */
+    private fun fclDeclaredThisTick(profile: OapsProfileAimi): Boolean =
+        FclMealBasal.declared(
+            fclNoteActive = fclTime,
+            sportNoteActive = sportTime,
+            tempTargetSet = profile.temptargetSet,
+            targetBgMgdl = profile.target_bg,
+        )
     private var bfastTime = false
     private var lunchTime = false
     private var dinnerTime = false
@@ -11448,6 +11608,13 @@ class DetermineBasalaimiSMB2 @Inject constructor(
 
     /** Clock of the last tick counted in [ceilingRepeatCount]; a hole restarts the count. */
     private var ceilingRepeatLastMs: Long = 0L
+
+    /**
+     * Holds the meal-confirmed early release off after a post-peak tail. Cross-tick on purpose — the
+     * whole point of [MealConfirmedEarlyReleaseLatch] is that one noisy tick must not undo the
+     * breaker, so this must NOT be reset per tick.
+     */
+    private var mcerTailLatch = MealConfirmedEarlyReleaseLatch.State()
     private var mealAdvisorOneShotThisTick: Boolean = false
     private var lastTubeAdvisorSmbCapScale: Double? = null
 
@@ -13232,7 +13399,14 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 eventualBgMgdl = eventualBG.takeIf { it.isFinite() && it > 1.0 },
                 deltaMgdl5m = delta.toDouble(),
                 iobU = iobNet,
-                mealModeActive = isMealMode,
+                // A manually declared mode exempts these invariants — that is this module's own
+                // stated contract ("Modes repas exclus"), and FCL is a manually declared mode.
+                // Leaving it out pinned the FCL basal to the profile rate: the floor raised it to the
+                // meal ceiling and postHypoCap pulled it straight back to profile.current_basal a few
+                // lines later. Reported from the field 2026-09-17.
+                // `isMealMode` itself is deliberately NOT widened: it also builds MealSafetyContext,
+                // which loosens an LGS guard, and FCL must not buy a weaker hypo interlock.
+                mealModeActive = isMealMode || fclDeclaredThisTick(profile),
                 postHypoActive = lastPostHypoDeliveryAuthority.active,
             )
         )
@@ -13624,6 +13798,7 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             mealPriorityContext = smbDeliveryPriorityContext,
             endogenousCounterRegulatory = endogenousCounterRegulatory,
             mealAbsorptionPhase = mealAbsorption?.phase ?: MealAbsorptionPhase.NONE,
+            mealModeActive = mealTime || bfastTime || lunchTime || dinnerTime || snackTime || highCarbTime,
         )
         var iobSurveillanceSuppressRedCarpet = stackingEval.suppressRedCarpetRestore
 
@@ -16696,6 +16871,11 @@ class DetermineBasalaimiSMB2 @Inject constructor(
         // Option A : contrôle a posteriori de la délivrance des prébolus déjà demandés (alerte seule,
         // ne modifie ni le latch ni la décision de ce tick). Doit tourner AVANT les branches P1/P2/MAINT
         // car à runtime 8-14 la branche P1 n'est plus exécutée.
+        // 🍽️ FCL takes part in the two mechanisms below — the delivery carry-forward and the one-shot
+        // latch — but NOT in the `legacyMealMaint` block further down: that one ends the tick for
+        // thirty minutes on a bare TBR, and FCL must leave the bolus channel alive.
+        val fclDeclared = fclDeclaredThisTick(profile)
+
         checkLegacyPrebolusDeliveryAndAlert(rT)
 
         // 🍱 Carry-forward (garantie de délivrance) : un prébolus demandé mais jamais confirmé en base
@@ -16710,6 +16890,10 @@ class DetermineBasalaimiSMB2 @Inject constructor(
                 dinnerTime   -> dinnerruntime
                 highCarbTime -> highCarbrunTime
                 snackTime    -> snackrunTime
+                // The delivery guarantee is exactly the anti-redundancy mechanism FCL needs: while a
+                // requested prebolus is still unconfirmed, no insulin has landed, so the same amount
+                // is re-proposed instead of an SMB being stacked on top of an unknown outcome.
+                fclDeclared  -> fclruntime
                 else         -> null
             }
             if (activeModeRuntime != null) {
@@ -16828,6 +17012,27 @@ class DetermineBasalaimiSMB2 @Inject constructor(
             markLegacyMealDecision()
             return rT
         }
+        // 🍽️ FCL: ONE prebolus per activation, and then the tick flows normally for the rest of the
+        // window so SMB and Autodrive stay alive. Three things make that true:
+        //  - the 0..7 window, the same one every other P1 phase uses;
+        //  - the one-shot latch, checked HERE and not only inside setLegacyPrebolusUnits, because this
+        //    branch returns and would otherwise end the tick on all eight of those minutes;
+        //  - the absence of FCL from `legacyMealMaint` below.
+        // The amount is the Autodrive prebolus the person already set, so there is nothing new to
+        // configure. The Autodrive aggressive-rise floor is NOT used for this: it has no per-episode
+        // budget by design (removed 2026-08-10 after a measured hyperglycaemia), so it would fire on
+        // every tick of the window — the documented bolus-storm mechanism. One shot behind a latch
+        // instead.
+        if (fclDeclared && fclruntime in 0..7 && !prebolusAlreadyFiredThisActivation("FCL_P1", fclruntime)) {
+            manualMealModeTbr(fclruntime, "FCL_P1", overrideSafetyLimits = false)
+            setLegacyPrebolusUnits(rbf(DoubleKey.OApsAIMIautodrivePrebolus), "FCL_P1", fclruntime) { u ->
+                rT.reason.append(context.getString(R.string.fcl_prebolus, u))
+                consoleLog.add("🍽️ FCL_PREBOLUS P1=${"%.2f".format(Locale.US, u)}U rt=${fclruntime}m")
+            }
+            markLegacyMealDecision()
+            return rT
+        }
+
         // Même priorité que les blocs prébolus ci‑dessus : premier mode actif dans les 30 premières minutes gagne.
         val legacyMealMaint = when {
             mealTime && mealruntime in 0..29 -> mealruntime to "MEAL_MAINT"
